@@ -39,6 +39,8 @@ struct Hit: Identifiable, Hashable, Codable {
 
     var id: String { number }
     var primaryRule: String { matches.first?.ruleName ?? "" }
+    /// 选号池的号会被别人拿走，超过 2 小时的结果标记为可能失效
+    var isStale: Bool { Date().timeIntervalSince(foundAt) > 2 * 3600 }
 
     /// 3-4-4 分段显示
     var formatted: String {

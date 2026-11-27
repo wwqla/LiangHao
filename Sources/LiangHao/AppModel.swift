@@ -3,6 +3,7 @@ import AppKit
 import UserNotifications
 import Observation
 import UniformTypeIdentifiers
+import Network
 
 @Observable
 @MainActor
@@ -13,12 +14,23 @@ final class AppModel {
     var customPatterns: [String] = []
     var excludeText: String = "4"
     var speed: Speed = .steady
+    var watchKeywords: [String] = ["8888", "520"]
+    var alertHighScore = true
 
     // MARK: 结果
     var hits: [Hit] = []
     var selectedHitID: String?
     var searchText: String = ""
     var log: [String] = []
+    var ruleFilter: String?            // 中栏按规律筛选，nil = 全部
+    var showLog = false
+    var showRegionPicker = false
+    private(set) var isOnline = true
+    private(set) var updateURL: URL?
+    var lastExportDate: Date?
+
+    /// 联通官方选号页（num.10010.com 会跳到这里）
+    static let orderURL = URL(string: "https://card.10010.com/numberPro/numberH5Page")!
 
     // MARK: 状态
     private(set) var isRunning = false
@@ -30,6 +42,7 @@ final class AppModel {
     @ObservationIgnored private var seen: Set<String> = []
     @ObservationIgnored private var task: Task<Void, Never>?
     @ObservationIgnored private var recent: [(Date, Int)] = []
+    @ObservationIgnored private let monitor = NWPathMonitor()
     private let source: NumberSource = UnicomSource()
 
     let provinces = RegionData.provinces
@@ -39,6 +52,12 @@ final class AppModel {
         if selectedCities.isEmpty, let gd = provinces.first(where: { $0.name == "广东" }) {
             selectedCities = Set(gd.cities.map(\.code))
         }
+        monitor.pathUpdateHandler = { [weak self] path in
+            let ok = path.status == .satisfied
+            Task { @MainActor in self?.setOnline(ok) }
+        }
+        monitor.start(queue: DispatchQueue(label: "net.monitor"))
+        Task { await checkUpdate() }
         if Self.canNotify {
             UNUserNotificationCenter.current().requestAuthorization(options: [.alert, .sound]) { _, _ in }
         }
@@ -53,7 +72,8 @@ final class AppModel {
 
     var filteredHits: [Hit] {
         let q = searchText.trimmingCharacters(in: .whitespaces)
-        let list = q.isEmpty ? hits : hits.filter { $0.number.contains(q) }
+        var list = q.isEmpty ? hits : hits.filter { $0.number.contains(q) }
+        if let f = ruleFilter { list = list.filter { $0.primaryRule == f } }
         return list.sorted { $0.score != $1.score ? $0.score > $1.score : $0.number < $1.number }
     }
 
@@ -62,6 +82,37 @@ final class AppModel {
         let groups = Dictionary(grouping: filteredHits, by: \.primaryRule)
         return groups.map { HitGroup(rule: $0.key, hits: $0.value) }.sorted { ($0.hits.first?.score ?? 0) > ($1.hits.first?.score ?? 0) }
     }
+
+    /// 每条主规律命中多少（筛选标签用），按数量排
+    var ruleCounts: [(rule: String, count: Int)] {
+        Dictionary(grouping: hits, by: \.primaryRule)
+            .map { (rule: $0.key, count: $0.value.count) }
+            .sorted { $0.count > $1.count }
+    }
+
+    var todayCount: Int { hits.filter { Calendar.current.isDateInToday($0.foundAt) }.count }
+
+    var regionSummary: String {
+        let full = provinces.filter(isProvinceFullySelected)
+        let part = provinces.filter { isProvincePartlySelected($0) && !isProvinceFullySelected($0) }
+        if full.count == provinces.count { return "全国" }
+        if full.isEmpty && part.isEmpty { return "未选择" }
+        var names = full.map { $0.name + "全省" }
+        names += part.map { p in "\(p.name) \(p.cities.filter { selectedCities.contains($0.code) }.count) 城" }
+        if names.count > 3 { return names.prefix(3).joined(separator: "、") + " 等 \(names.count) 省" }
+        return names.joined(separator: "、")
+    }
+
+    func isWatched(_ number: String) -> String? {
+        let tail = String(number.suffix(8))
+        return watchKeywords.first { !$0.isEmpty && tail.contains($0) }
+    }
+    func addKeyword(_ k: String) -> Bool {
+        let t = k.trimmingCharacters(in: .whitespaces)
+        guard !t.isEmpty, t.allSatisfy(\.isNumber), t.count <= 8, !watchKeywords.contains(t) else { return false }
+        watchKeywords.append(t); save(); return true
+    }
+    func removeKeyword(_ k: String) { watchKeywords.removeAll { $0 == k }; save() }
 
     var selectedHit: Hit? { hits.first { $0.id == selectedHitID } }
 
@@ -126,6 +177,12 @@ final class AppModel {
         var badWaves = 0
         let src = source
         while !Task.isCancelled {
+            if !isOnline {
+                statusNote = "网络已断开，恢复后自动继续"
+                try? await Task.sleep(for: .seconds(2))
+                continue
+            }
+            if statusNote.hasPrefix("网络") { statusNote = "" }
             let n = concurrency
             let batch = (0..<n).map { targets[(cursor + $0) % targets.count] }
             cursor = (cursor + n) % targets.count
@@ -171,13 +228,20 @@ final class AppModel {
         var fresh = 0
         for num in numbers where seen.insert(num).inserted {
             fresh += 1
-            guard let r = evaluator.evaluate(num) else { continue }
+            var found = evaluator.evaluate(num)
+            if found == nil, let k = isWatched(num), let range = num.range(of: k, options: .backwards) {
+                let lo = num.distance(from: num.startIndex, to: range.lowerBound)
+                let m = RuleMatch(ruleName: "关注 \(k)", range: lo..<(lo + k.count), score: 60)
+                found = ([m], 60)
+            }
+            guard let r = found else { continue }
             let score = r.score
             let hit = Hit(number: num, provinceName: target.province.name, cityName: target.city.name,
                           matches: r.matches, score: score, foundAt: Date())
             hits.append(hit)
             addLog("命中 \(hit.formatted) · \(hit.primaryRule) · \(target.city.name)")
-            if score >= 90 { notify(hit) }
+            if let k = isWatched(num) { notify(hit, reason: "关注 \(k)") }
+            else if alertHighScore && score >= 90 { notify(hit, reason: "高分") }
             if hits.count % 20 == 0 { save() }
         }
         checkedCount += fresh
@@ -185,6 +249,35 @@ final class AppModel {
         recent.append((now, fresh))
         recent.removeAll { now.timeIntervalSince($0.0) > 60 }
         perMinute = recent.reduce(0) { $0 + $1.1 }
+    }
+
+    private func setOnline(_ ok: Bool) {
+        guard ok != isOnline else { return }
+        isOnline = ok
+        addLog(ok ? "网络已恢复" : "网络已断开")
+    }
+
+    /// 启动时看 GitHub Release 有没有新版（Release 标题末尾是 commit 短号）
+    func checkUpdate() async {
+        let local = Bundle.main.object(forInfoDictionaryKey: "CFBundleVersion") as? String ?? "dev"
+        guard local.count == 7,
+              let url = URL(string: "https://api.github.com/repos/wwqla/LiangHao/releases/tags/latest"),
+              let result = try? await URLSession.shared.data(from: url),
+              let json = try? JSONSerialization.jsonObject(with: result.0) as? [String: Any],
+              let name = json["name"] as? String,
+              let page = (json["html_url"] as? String).flatMap(URL.init(string:))
+        else { return }
+        if !name.hasSuffix(local) { updateURL = page }
+    }
+
+    func openOrder(_ hit: Hit) {
+        copy(hit)
+        NSWorkspace.shared.open(Self.orderURL)
+        addLog("已复制 \(hit.formatted)，打开联通官方选号页")
+    }
+
+    func revealData() {
+        NSWorkspace.shared.activateFileViewerSelecting([fileURL])
     }
 
     // MARK: - 结果操作
@@ -199,6 +292,7 @@ final class AppModel {
         seen.removeAll()
         checkedCount = 0
         selectedHitID = nil
+        ruleFilter = nil
         save()
     }
 
@@ -207,23 +301,54 @@ final class AppModel {
         NSPasteboard.general.setString(hit.number, forType: .string)
     }
 
-    func exportCSV() {
+    enum ExportFormat { case excel, csv }
+
+    func export(_ format: ExportFormat, onlyNew: Bool = false) {
+        var list = filteredHits
+        if onlyNew, let last = lastExportDate { list = list.filter { $0.foundAt > last } }
+        guard !list.isEmpty else { addLog(onlyNew ? "上次导出之后没有新号码" : "没有可导出的号码"); return }
         let panel = NSSavePanel()
-        panel.nameFieldStringValue = "靓号-\(Int(Date().timeIntervalSince1970)).csv"
-        panel.allowedContentTypes = [.commaSeparatedText]
-        guard panel.runModal() == .OK, let url = panel.url else { return }
-        var s = "\u{FEFF}号码,靓号分,规律,省份,城市,收藏\n"
-        for h in filteredHits {
-            s += "\(h.number),\(h.score),\(h.matches.map(\.ruleName).joined(separator: "/")),\(h.provinceName),\(h.cityName),\(h.favorite ? "是" : "")\n"
+        let stamp = Int(Date().timeIntervalSince1970)
+        switch format {
+        case .excel:
+            panel.nameFieldStringValue = "靓号-\(stamp).xlsx"
+            panel.allowedContentTypes = [UTType(filenameExtension: "xlsx") ?? .data]
+        case .csv:
+            panel.nameFieldStringValue = "靓号-\(stamp).csv"
+            panel.allowedContentTypes = [.commaSeparatedText]
         }
-        try? s.write(to: url, atomically: true, encoding: .utf8)
+        guard panel.runModal() == .OK, let url = panel.url else { return }
+        let header = ["号码", "靓号分", "规律", "省份", "城市", "发现时间", "收藏", "办理入口"]
+        let f = DateFormatter(); f.dateFormat = "yyyy-MM-dd HH:mm"
+        let rows: [[String]] = list.map { h in
+            [h.number, String(h.score), h.matches.map(\.ruleName).joined(separator: " / "),
+             h.provinceName, h.cityName, f.string(from: h.foundAt), h.favorite ? "是" : "", Self.orderURL.absoluteString]
+        }
+        do {
+            switch format {
+            case .excel: try XLSXWriter.write(header: header, rows: rows, to: url)
+            case .csv:
+                // 号码前加 \t，Excel 打开不会变成科学计数法
+                var s = "\u{FEFF}" + header.joined(separator: ",") + "\n"
+                for r in rows { s += (["\t" + r[0]] + r.dropFirst().map { "\"\($0)\"" }).joined(separator: ",") + "\n" }
+                try s.write(to: url, atomically: true, encoding: .utf8)
+            }
+            lastExportDate = Date()
+            save()
+            addLog("已导出 \(list.count) 个号码")
+            NSWorkspace.shared.activateFileViewerSelecting([url])
+        } catch {
+            addLog("导出失败：\(error.localizedDescription)")
+        }
     }
 
-    private func notify(_ hit: Hit) {
+    func exportCSV() { export(.csv) }
+
+    private func notify(_ hit: Hit, reason: String) {
         NSSound(named: "Glass")?.play()
         guard Self.canNotify else { return }
         let c = UNMutableNotificationContent()
-        c.title = "扫到靓号 \(hit.formatted)"
+        c.title = "扫到靓号 \(hit.formatted)（\(reason)）"
         c.body = "\(hit.primaryRule) · \(hit.provinceName)\(hit.cityName) · \(hit.score) 分"
         UNUserNotificationCenter.current().add(UNNotificationRequest(identifier: hit.number, content: c, trigger: nil))
     }
@@ -245,9 +370,12 @@ final class AppModel {
         var customPatterns: [String]
         var excludeText: String
         var speed: Speed
+        var watchKeywords: [String]?
+        var alertHighScore: Bool?
+        var lastExportDate: Date?
     }
 
-    private var fileURL: URL {
+    var fileURL: URL {
         let dir = FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask)[0]
             .appendingPathComponent("LiangHao", isDirectory: true)
         try? FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
@@ -256,7 +384,8 @@ final class AppModel {
 
     func save() {
         let s = Saved(hits: hits, selectedCities: selectedCities, enabledRules: enabledRules,
-                      customPatterns: customPatterns, excludeText: excludeText, speed: speed)
+                      customPatterns: customPatterns, excludeText: excludeText, speed: speed,
+                      watchKeywords: watchKeywords, alertHighScore: alertHighScore, lastExportDate: lastExportDate)
         if let d = try? JSONEncoder().encode(s) { try? d.write(to: fileURL) }
     }
 
@@ -269,5 +398,8 @@ final class AppModel {
         customPatterns = s.customPatterns
         excludeText = s.excludeText
         speed = s.speed
+        if let w = s.watchKeywords { watchKeywords = w }
+        if let a = s.alertHighScore { alertHighScore = a }
+        lastExportDate = s.lastExportDate
     }
 }
