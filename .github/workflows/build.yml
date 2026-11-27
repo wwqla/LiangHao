@@ -1,0 +1,35 @@
+name: Build macOS app
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    runs-on: macos-15
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Build 靓号助手.app
+        run: ./build-app.sh
+
+      - name: Zip
+        run: ditto -c -k --keepParent "靓号助手.app" LiangHao-macOS.zip
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: LiangHao-macOS
+          path: LiangHao-macOS.zip
+
+      - name: Publish release "latest"
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh release delete latest -y --cleanup-tag || true
+          gh release create latest LiangHao-macOS.zip \
+            --title "靓号助手 (macOS) - ${GITHUB_SHA::7}" \
+            --notes "自动构建。下载 LiangHao-macOS.zip，解压后右键「靓号助手」→ 打开。"
