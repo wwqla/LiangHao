@@ -21,6 +21,10 @@ final class AppModel {
     var manualConcurrency = 8
     var manualIntervalMs = 300
     var scanMode: ScanMode = .spaced
+    // 每天定时自动扫一次
+    var scheduleEnabled = false
+    var scheduleMinutes = 9 * 60          // 从 0 点起的分钟数
+    var lastScheduledRun: Date?
 
     // MARK: 结果
     var hits: [Hit] = []
@@ -52,6 +56,7 @@ final class AppModel {
     @ObservationIgnored private var task: Task<Void, Never>?
     @ObservationIgnored private var recent: [(Date, Int)] = []
     @ObservationIgnored private let monitor = NWPathMonitor()
+    @ObservationIgnored private var scheduleTimer: Timer?
     private let source: NumberSource = UnicomSource()
 
     let provinces = RegionData.provinces
@@ -67,6 +72,9 @@ final class AppModel {
         }
         monitor.start(queue: DispatchQueue(label: "net.monitor"))
         Task { await checkUpdate() }
+        scheduleTimer = Timer.scheduledTimer(withTimeInterval: 30, repeats: true) { [weak self] _ in
+            Task { @MainActor in self?.checkSchedule() }
+        }
         if Self.canNotify {
             UNUserNotificationCenter.current().requestAuthorization(options: [.alert, .sound]) { _, _ in }
         }
@@ -327,6 +335,28 @@ final class AppModel {
         return fresh
     }
 
+    var scheduleTime: Date {
+        get { Calendar.current.date(bySettingHour: scheduleMinutes / 60, minute: scheduleMinutes % 60, second: 0, of: Date()) ?? Date() }
+        set {
+            let c = Calendar.current.dateComponents([.hour, .minute], from: newValue)
+            scheduleMinutes = (c.hour ?? 9) * 60 + (c.minute ?? 0)
+            save()
+        }
+    }
+
+    private func checkSchedule() {
+        guard scheduleEnabled, !isRunning else { return }
+        let now = Date()
+        let c = Calendar.current.dateComponents([.hour, .minute], from: now)
+        let minutes = (c.hour ?? 0) * 60 + (c.minute ?? 0)
+        guard minutes >= scheduleMinutes else { return }
+        if let last = lastScheduledRun, Calendar.current.isDateInToday(last) { return }
+        lastScheduledRun = now
+        addLog("到点了，开始每日定时扫描")
+        start()
+        save()
+    }
+
     private func setOnline(_ ok: Bool) {
         guard ok != isOnline else { return }
         isOnline = ok
@@ -481,6 +511,9 @@ final class AppModel {
         var manualConcurrency: Int?
         var manualIntervalMs: Int?
         var scanMode: ScanMode?
+        var scheduleEnabled: Bool?
+        var scheduleMinutes: Int?
+        var lastScheduledRun: Date?
     }
 
     var fileURL: URL {
@@ -495,7 +528,8 @@ final class AppModel {
                       customPatterns: customPatterns, excludeText: excludeText, speed: speed,
                       watchKeywords: watchKeywords, alertHighScore: alertHighScore, lastExportDate: lastExportDate,
                       manualControl: manualControl, manualConcurrency: manualConcurrency,
-                      manualIntervalMs: manualIntervalMs, scanMode: scanMode)
+                      manualIntervalMs: manualIntervalMs, scanMode: scanMode,
+                      scheduleEnabled: scheduleEnabled, scheduleMinutes: scheduleMinutes, lastScheduledRun: lastScheduledRun)
         if let d = try? JSONEncoder().encode(s) { try? d.write(to: fileURL) }
     }
 
@@ -515,5 +549,8 @@ final class AppModel {
         if let v = s.manualConcurrency { manualConcurrency = v }
         if let v = s.manualIntervalMs { manualIntervalMs = v }
         if let v = s.scanMode { scanMode = v }
+        if let v = s.scheduleEnabled { scheduleEnabled = v }
+        if let v = s.scheduleMinutes { scheduleMinutes = v }
+        lastScheduledRun = s.lastScheduledRun
     }
 }

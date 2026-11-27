@@ -732,6 +732,18 @@ struct SettingsView: View {
             }
             .disabled(model.isRunning)
 
+            Section {
+                Toggle("每天自动扫一次", isOn: $model.scheduleEnabled)
+                if model.scheduleEnabled {
+                    DatePicker("时间", selection: $model.scheduleTime, displayedComponents: .hourAndMinute)
+                }
+            } header: {
+                Text("定时扫描")
+            } footer: {
+                Text("到点用当前选的地区和规律扫一遍，只报新号，扫完自动停。需要软件开着（关掉窗口也行，菜单栏有图标）。")
+                    .font(.caption).foregroundStyle(.secondary)
+            }
+
             Section("提醒") {
                 Toggle("高分号码（≥90 分）也提醒", isOn: $model.alertHighScore)
                 Text("「关注号码」命中时总会提醒，在主窗口左栏设置").font(.caption).foregroundStyle(.secondary)
@@ -752,5 +764,6 @@ struct SettingsView: View {
         .onChange(of: model.manualConcurrency) { model.save() }
         .onChange(of: model.manualIntervalMs) { model.save() }
         .onChange(of: model.scanMode) { model.save() }
+        .onChange(of: model.scheduleEnabled) { model.save() }
     }
 }
