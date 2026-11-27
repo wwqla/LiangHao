@@ -36,6 +36,13 @@ struct Hit: Identifiable, Hashable, Codable {
     let score: Int
     let foundAt: Date
     var favorite: Bool = false
+    var carrier: String? = nil     // nil = 联通接口扫的；网页扫号时为运营商名
+
+    var carrierName: String { carrier ?? "中国联通" }
+    /// 列表里显示的位置
+    var shortLocation: String { carrier == nil ? "\(provinceName) \(cityName)" : "\(carrierName) · 网页" }
+    /// 详情页显示的位置
+    var locationText: String { carrier == nil ? "\(provinceName) · \(cityName) · 中国联通" : "\(carrierName) · 网页选号" }
 
     var id: String { number }
     var primaryRule: String { matches.first?.ruleName ?? "" }

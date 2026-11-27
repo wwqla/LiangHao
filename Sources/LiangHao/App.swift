@@ -16,6 +16,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 struct LiangHaoApp: App {
     @NSApplicationDelegateAdaptor(AppDelegate.self) private var delegate
     @State private var model = AppModel()
+    @State private var web = WebScanner()
 
     init() {
         NSApplication.shared.setActivationPolicy(.regular)
@@ -35,6 +36,14 @@ struct LiangHaoApp: App {
         .windowToolbarStyle(.unified(showsTitle: false))
         .defaultSize(width: 1180, height: 760)
         .commands { AppCommands(model: model) }
+
+        Window("网页扫号", id: "web") {
+            WebScanView()
+                .environment(model)
+                .environment(web)
+                .tint(.lucky)
+        }
+        .defaultSize(width: 560, height: 860)
 
         Settings {
             SettingsView()
@@ -58,6 +67,7 @@ struct LiangHaoApp: App {
 
 struct AppCommands: Commands {
     let model: AppModel
+    @Environment(\.openWindow) private var openWindow
 
     var body: some Commands {
         // 去掉「新建窗口」
@@ -78,6 +88,8 @@ struct AppCommands: Commands {
             Button(model.isRunning ? "暂停扫描" : "开始扫描") { model.toggleRun() }
                 .keyboardShortcut("r", modifiers: .command)
             Divider()
+            Button("网页扫号（移动 / 电信 / 广电）…") { openWindow(id: "web") }
+                .keyboardShortcut("w", modifiers: [.command, .shift])
             Button("选择地区…") { model.showRegionPicker = true }
                 .keyboardShortcut("l", modifiers: [.command, .shift])
                 .disabled(model.isRunning)

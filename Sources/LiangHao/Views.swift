@@ -169,6 +169,7 @@ struct InlineAdd: View {
 
 struct SidebarView: View {
     @Environment(AppModel.self) private var model
+    @Environment(\.openWindow) private var openWindow
 
     var body: some View {
         VStack(spacing: 0) {
@@ -180,7 +181,7 @@ struct SidebarView: View {
                             .frame(width: 34, height: 34)
                         VStack(alignment: .leading, spacing: 1) {
                             Text("靓号助手").font(.headline)
-                            Text("中国联通 · 全国选号池").font(.caption).foregroundStyle(.secondary)
+                            Text("联通全国选号池 · 移动电信广电网页扫").font(.caption).foregroundStyle(.secondary)
                         }
                     }
                     .padding(.bottom, 2)
@@ -240,6 +241,12 @@ struct SidebarView: View {
                         .padding(.vertical, 4)
                 }
                 .buttonStyle(.borderedProminent)
+                .controlSize(.large)
+
+                Button { openWindow(id: "web") } label: {
+                    Label("网页扫号：移动 / 电信 / 广电", systemImage: "globe")
+                        .frame(maxWidth: .infinity)
+                }
                 .controlSize(.large)
 
                 HStack(spacing: 6) {
@@ -519,7 +526,7 @@ struct HitRow: View {
                         .padding(.horizontal, 6).padding(.vertical, 2)
                         .background(Capsule().fill(Color.lucky.opacity(0.12)))
                         .foregroundStyle(Color.lucky)
-                    Text("\(hit.provinceName) \(hit.cityName)").font(.caption).foregroundStyle(.secondary)
+                    Text(hit.shortLocation).font(.caption).foregroundStyle(.secondary)
                     if hit.isStale {
                         Text("可能已被选走").font(.caption2).foregroundStyle(.orange)
                     }
@@ -584,7 +591,7 @@ struct DetailView: View {
             ScrollView {
                 VStack(alignment: .leading, spacing: 18) {
                     VStack(alignment: .leading, spacing: 10) {
-                        Text("\(hit.provinceName) · \(hit.cityName) · 中国联通")
+                        Text(hit.locationText)
                             .font(.callout)
                             .foregroundStyle(Color.white.opacity(0.85))
                         HighlightedNumber(hit: hit, size: 38, onDark: true)
@@ -615,7 +622,7 @@ struct DetailView: View {
                     }
                     .controlSize(.large)
 
-                    Text("「去办理」会复制号码并打开联通官方选号页，在页面里按尾号搜索即可。号码随时可能被别人选走，看中了尽快办。")
+                    Text("「去办理」会复制号码并打开\(hit.carrierName)官方选号页，在页面里按尾号搜索即可。号码随时可能被别人选走，看中了尽快办。")
                         .font(.caption)
                         .foregroundStyle(.secondary)
                         .fixedSize(horizontal: false, vertical: true)

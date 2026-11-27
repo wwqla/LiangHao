@@ -348,8 +348,36 @@ final class AppModel {
 
     func openOrder(_ hit: Hit) {
         copy(hit)
-        NSWorkspace.shared.open(Self.orderURL)
-        addLog("已复制 \(hit.formatted)，打开联通官方选号页")
+        let url = hit.carrier.flatMap(WebCarrier.init(rawValue:)).flatMap { URL(string: $0.defaultURL) } ?? Self.orderURL
+        NSWorkspace.shared.open(url)
+        addLog("已复制 \(hit.formatted)，打开\(hit.carrierName)官方选号页")
+    }
+
+    /// 网页扫号收进来的号码：去重、过规律、记录命中。返回新号数量
+    @discardableResult
+    func ingestWeb(_ numbers: [String], carrier: WebCarrier) -> Int {
+        let rules = allRules.filter { enabledRules.contains($0.id) }
+        let evaluator = Evaluator(rules: rules, excludedDigits: Set(excludeText.compactMap { $0.wholeNumberValue }))
+        var fresh = 0
+        for num in numbers where num.count == 11 && seen.insert(num).inserted {
+            fresh += 1
+            var found = evaluator.evaluate(num)
+            if found == nil, let k = isWatched(num), let range = num.range(of: k, options: .backwards) {
+                let lo = num.distance(from: num.startIndex, to: range.lowerBound)
+                found = ([RuleMatch(ruleName: "关注 \(k)", range: lo..<(lo + k.count), score: 60)], 60)
+            }
+            guard let r = found else { continue }
+            var hit = Hit(number: num, provinceName: "", cityName: "网页选号",
+                          matches: r.matches, score: r.score, foundAt: Date())
+            hit.carrier = carrier.rawValue
+            hits.append(hit)
+            addLog("命中 \(hit.formatted) · \(hit.primaryRule) · \(carrier.rawValue)")
+            if let k = isWatched(num) { notify(hit, reason: "关注 \(k)") }
+            else if alertHighScore && r.score >= 90 { notify(hit, reason: "高分") }
+        }
+        checkedCount += fresh
+        if fresh > 0 { save() }
+        return fresh
     }
 
     func revealData() {
@@ -425,7 +453,7 @@ final class AppModel {
         guard Self.canNotify else { return }
         let c = UNMutableNotificationContent()
         c.title = "扫到靓号 \(hit.formatted)（\(reason)）"
-        c.body = "\(hit.primaryRule) · \(hit.provinceName)\(hit.cityName) · \(hit.score) 分"
+        c.body = "\(hit.primaryRule) · \(hit.shortLocation) · \(hit.score) 分"
         UNUserNotificationCenter.current().add(UNNotificationRequest(identifier: hit.number, content: c, trigger: nil))
     }
 
