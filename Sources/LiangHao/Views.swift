@@ -264,7 +264,10 @@ struct SidebarView: View {
 
     private var statusText: String {
         if !model.statusNote.isEmpty { return model.statusNote }
-        if model.isRunning { return "扫描中 · 速度「\(model.speed.rawValue)」· 并发 \(model.concurrency)" }
+        if model.isRunning {
+            if model.manualControl { return "扫描中 · 手动 \(model.scanMode.rawValue) · 并发 \(model.concurrency)" }
+            return "扫描中 · 速度「\(model.speed.rawValue)」· 并发 \(model.concurrency)"
+        }
         return "已停止 · ⌘R 开始"
     }
 }
@@ -681,11 +684,35 @@ struct SettingsView: View {
                     Text("稳（不易被限流）").tag(Speed.steady)
                     Text("快").tag(Speed.fast)
                 }
-                .disabled(model.isRunning)
+                .disabled(model.isRunning || model.manualControl)
                 TextField("排除数字", text: $model.excludeText, prompt: Text("例如 4"))
                     .disabled(model.isRunning)
                 Text("号码后 8 位含这些数字就跳过").font(.caption).foregroundStyle(.secondary)
             }
+            Section {
+                Toggle("手动控制速度", isOn: $model.manualControl)
+                if model.manualControl {
+                    Stepper(value: $model.manualConcurrency, in: 1...64) {
+                        LabeledContent("并发数", value: "\(model.manualConcurrency)")
+                    }
+                    Stepper(value: $model.manualIntervalMs, in: 0...3000, step: 50) {
+                        LabeledContent("间隔", value: "\(model.manualIntervalMs) 毫秒")
+                    }
+                    Picker("扫号模式", selection: $model.scanMode) {
+                        Text("分投（按间隔逐个发，稳定）").tag(ScanMode.spaced)
+                        Text("速投（一批同时发，快）").tag(ScanMode.burst)
+                    }
+                }
+            } header: {
+                Text("高级")
+            } footer: {
+                Text(model.manualControl
+                     ? "并发越大、间隔越小越快，也越容易被联通限流封 IP。建议并发 4–16，间隔 200–500 毫秒。出错时仍会自动暂停退避。"
+                     : "默认自动调速：顺利就加快，被限流就减半。")
+                    .font(.caption).foregroundStyle(.secondary)
+            }
+            .disabled(model.isRunning)
+
             Section("提醒") {
                 Toggle("高分号码（≥90 分）也提醒", isOn: $model.alertHighScore)
                 Text("「关注号码」命中时总会提醒，在主窗口左栏设置").font(.caption).foregroundStyle(.secondary)
@@ -702,5 +729,9 @@ struct SettingsView: View {
         .onChange(of: model.speed) { model.save() }
         .onChange(of: model.excludeText) { model.save() }
         .onChange(of: model.alertHighScore) { model.save() }
+        .onChange(of: model.manualControl) { model.save() }
+        .onChange(of: model.manualConcurrency) { model.save() }
+        .onChange(of: model.manualIntervalMs) { model.save() }
+        .onChange(of: model.scanMode) { model.save() }
     }
 }

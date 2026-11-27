@@ -65,3 +65,10 @@ struct HitGroup: Identifiable {
     let hits: [Hit]
     var id: String { rule }
 }
+
+/// 参考菠萝扫号的两种投放模式
+enum ScanMode: String, CaseIterable, Identifiable, Codable {
+    case spaced = "分投"   // 按间隔一个一个发，稳定
+    case burst = "速投"    // 一批同时发，快但容易被限流
+    var id: String { rawValue }
+}

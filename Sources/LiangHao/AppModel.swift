@@ -16,6 +16,11 @@ final class AppModel {
     var speed: Speed = .steady
     var watchKeywords: [String] = ["8888", "520"]
     var alertHighScore = true
+    // 高级：手动控制（参考菠萝的线程 / 间隔 / 模式）
+    var manualControl = false
+    var manualConcurrency = 8
+    var manualIntervalMs = 300
+    var scanMode: ScanMode = .spaced
 
     // MARK: 结果
     var hits: [Hit] = []
@@ -183,14 +188,19 @@ final class AppModel {
                 continue
             }
             if statusNote.hasPrefix("网络") { statusNote = "" }
+            let manual = manualControl
+            if manual { concurrency = max(1, min(64, manualConcurrency)) }
             let n = concurrency
             let batch = (0..<n).map { targets[(cursor + $0) % targets.count] }
             cursor = (cursor + n) % targets.count
+            // 分投：每个请求错开一个间隔再发；速投：一起发
+            let stagger: Double = manual && scanMode == .spaced ? Double(manualIntervalMs) / 1000 : 0
 
             var results: [(Target, Result<[String], Error>)] = []
             await withTaskGroup(of: (Target, Result<[String], Error>).self) { g in
-                for t in batch {
+                for (i, t) in batch.enumerated() {
                     g.addTask {
+                        if stagger > 0 && i > 0 { try? await Task.sleep(for: .seconds(stagger * Double(i))) }
                         do { return (t, .success(try await src.fetch(t))) }
                         catch { return (t, .failure(error)) }
                     }
@@ -207,19 +217,24 @@ final class AppModel {
                 }
             }
 
-            // 自动调速：顺利就慢慢加，出错就减半并退避
+            // 自动调速：顺利就慢慢加，出错就减半并退避；手动模式只退避不改并发
             if failed > 0 {
                 badWaves += 1; goodWaves = 0
-                concurrency = max(1, concurrency / 2)
+                if !manual { concurrency = max(1, concurrency / 2) }
                 let wait = min(30.0, 2.0 * Double(badWaves))
                 statusNote = "接口繁忙，\(Int(wait)) 秒后继续"
-                addLog("\(failed) 个请求失败，降速并等待 \(Int(wait)) 秒")
+                addLog("\(failed) 个请求失败，等待 \(Int(wait)) 秒" + (manual ? "" : "并降速"))
                 try? await Task.sleep(for: .seconds(wait))
                 statusNote = ""
             } else {
                 badWaves = 0; goodWaves += 1
-                if goodWaves >= 3, concurrency < speed.maxConcurrency { concurrency += 1; goodWaves = 0 }
-                try? await Task.sleep(for: .seconds(speed.minDelay))
+                if manual {
+                    let gap = scanMode == .spaced ? Double(manualIntervalMs) / 1000 : 0.05
+                    try? await Task.sleep(for: .seconds(max(0.05, gap)))
+                } else {
+                    if goodWaves >= 3, concurrency < speed.maxConcurrency { concurrency += 1; goodWaves = 0 }
+                    try? await Task.sleep(for: .seconds(speed.minDelay))
+                }
             }
         }
     }
@@ -373,6 +388,10 @@ final class AppModel {
         var watchKeywords: [String]?
         var alertHighScore: Bool?
         var lastExportDate: Date?
+        var manualControl: Bool?
+        var manualConcurrency: Int?
+        var manualIntervalMs: Int?
+        var scanMode: ScanMode?
     }
 
     var fileURL: URL {
@@ -385,7 +404,9 @@ final class AppModel {
     func save() {
         let s = Saved(hits: hits, selectedCities: selectedCities, enabledRules: enabledRules,
                       customPatterns: customPatterns, excludeText: excludeText, speed: speed,
-                      watchKeywords: watchKeywords, alertHighScore: alertHighScore, lastExportDate: lastExportDate)
+                      watchKeywords: watchKeywords, alertHighScore: alertHighScore, lastExportDate: lastExportDate,
+                      manualControl: manualControl, manualConcurrency: manualConcurrency,
+                      manualIntervalMs: manualIntervalMs, scanMode: scanMode)
         if let d = try? JSONEncoder().encode(s) { try? d.write(to: fileURL) }
     }
 
@@ -401,5 +422,9 @@ final class AppModel {
         if let w = s.watchKeywords { watchKeywords = w }
         if let a = s.alertHighScore { alertHighScore = a }
         lastExportDate = s.lastExportDate
+        if let v = s.manualControl { manualControl = v }
+        if let v = s.manualConcurrency { manualConcurrency = v }
+        if let v = s.manualIntervalMs { manualIntervalMs = v }
+        if let v = s.scanMode { scanMode = v }
     }
 }
