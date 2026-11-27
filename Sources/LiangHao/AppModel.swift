@@ -44,6 +44,9 @@ final class AppModel {
     private(set) var concurrency = 1
     private(set) var statusNote = ""
     private(set) var exhaustedCities = 0
+    private(set) var receivedCount = 0   // 接口返回的号码总数（含重复）
+    private(set) var emptyCount = 0
+    private(set) var failCount = 0
 
     @ObservationIgnored private var seen: Set<String> = []
     @ObservationIgnored private var task: Task<Void, Never>?
@@ -164,6 +167,8 @@ final class AppModel {
         isRunning = true
         concurrency = 1
         exhaustedCities = 0
+        emptyCount = 0
+        failCount = 0
         statusNote = ""
         addLog("开始扫描：\(ts.count) 个城市，\(rules.count) 条规律")
         task = Task { [weak self] in await self?.loop(targets: ts, evaluator: evaluator) }
@@ -183,6 +188,7 @@ final class AppModel {
         var goodWaves = 0
         var badWaves = 0
         var dry: [String: Int] = [:]
+        var empty: [String: Int] = [:]
         let src = source
         while !Task.isCancelled {
             if !isOnline {
@@ -194,8 +200,11 @@ final class AppModel {
             let manual = manualControl
             if manual { concurrency = max(1, min(64, manualConcurrency)) }
             // 连续多次扫不出新号的城市视为「扫完了」，跳过；全部扫完就自动停止
-            let active = targets.filter { (dry[$0.city.code] ?? 0) < Self.dryLimit }
-            if active.isEmpty { finishExhausted(); break }
+            let active = targets.filter { (dry[$0.city.code] ?? 0) < Self.dryLimit && (empty[$0.city.code] ?? 0) < Self.emptyLimit }
+            if active.isEmpty {
+                let allEmpty = targets.allSatisfy { (empty[$0.city.code] ?? 0) >= Self.emptyLimit }
+                finishExhausted(rateLimited: allEmpty); break
+            }
             exhaustedCities = targets.count - active.count
             let n = min(concurrency, active.count)
             let batch = (0..<n).map { active[(cursor + $0) % active.count] }
@@ -217,16 +226,27 @@ final class AppModel {
             if Task.isCancelled { break }
 
             var failed = 0
+            var lastError = ""
             for (t, r) in results {
                 switch r {
+                case .failure(SourceError.empty(let code)):
+                    let e = (empty[t.city.code] ?? 0) + 1
+                    empty[t.city.code] = e
+                    emptyCount += 1
+                    if e == Self.emptyLimit { addLog("\(t.province.name)\(t.city.name) 连续返回空（\(code)），跳过") }
+                case .failure(let err):
+                    failed += 1
+                    failCount += 1
+                    lastError = err.localizedDescription
                 case .success(let nums):
+                    empty[t.city.code] = 0
+                    receivedCount += nums.count
                     let fresh = handle(nums, target: t, evaluator: evaluator)
                     let before = dry[t.city.code] ?? 0
                     dry[t.city.code] = fresh == 0 ? before + 1 : 0
                     if fresh == 0 && before + 1 == Self.dryLimit {
                         addLog("\(t.province.name)\(t.city.name) 已扫不出新号，跳过")
                     }
-                case .failure: failed += 1
                 }
             }
 
@@ -236,7 +256,7 @@ final class AppModel {
                 if !manual { concurrency = max(1, concurrency / 2) }
                 let wait = min(30.0, 2.0 * Double(badWaves))
                 statusNote = "接口繁忙，\(Int(wait)) 秒后继续"
-                addLog("\(failed) 个请求失败，等待 \(Int(wait)) 秒" + (manual ? "" : "并降速"))
+                addLog("\(failed) 个请求失败（\(lastError)），等待 \(Int(wait)) 秒" + (manual ? "" : "并降速"))
                 try? await Task.sleep(for: .seconds(wait))
                 statusNote = ""
             } else {
@@ -254,18 +274,25 @@ final class AppModel {
 
     /// 一个城市连续这么多次返回里没有新号，就认为号池扫完了
     static let dryLimit = 8
+    /// 一个城市连续这么多次返回空列表，就跳过（该城市没号，或被限流）
+    static let emptyLimit = 5
 
-    private func finishExhausted() {
+    private func finishExhausted(rateLimited: Bool = false) {
         task = nil
         isRunning = false
         statusNote = ""
         exhaustedCities = 0
-        addLog("所有选中城市都扫不出新号了，已自动停止。共查 \(checkedCount) 个，命中 \(hits.count) 个")
+        if rateLimited {
+            addLog("所有城市都一直返回空列表，可能被联通限流了。已停止，建议过半小时再试，或在设置里调慢速度")
+        } else {
+            addLog("所有选中城市都扫不出新号了，已自动停止。共查 \(checkedCount) 个，命中 \(hits.count) 个")
+        }
         NSSound(named: "Hero")?.play()
         if Self.canNotify {
             let c = UNMutableNotificationContent()
-            c.title = "扫号完成"
-            c.body = "选中地区的号池扫完了，共查 \(checkedCount) 个，命中 \(hits.count) 个"
+            c.title = rateLimited ? "扫号已停止" : "扫号完成"
+            c.body = rateLimited ? "接口一直返回空列表，可能被限流，过一会儿再试"
+                                 : "选中地区的号池扫完了，共查 \(checkedCount) 个，命中 \(hits.count) 个"
             UNUserNotificationCenter.current().add(UNNotificationRequest(identifier: "done-\(Date().timeIntervalSince1970)", content: c, trigger: nil))
         }
         save()

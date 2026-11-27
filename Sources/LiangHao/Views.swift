@@ -430,12 +430,23 @@ struct StatsStrip: View {
                 StatTile(title: "已查", value: model.checkedCount.formatted(), icon: "magnifyingglass")
                 StatTile(title: "命中", value: model.hits.count.formatted(), icon: "sparkles", highlight: true)
                 StatTile(title: "今日新增", value: model.todayCount.formatted(), icon: "sun.max")
-                StatTile(title: "每分钟", value: model.isRunning ? model.perMinute.formatted() : "–", icon: "speedometer")
+                StatTile(title: "每分钟新号", value: model.isRunning ? model.perMinute.formatted() : "–", icon: "speedometer")
             }
-            if !topCities.isEmpty {
-                Text("命中最多：" + topCities)
-                    .font(.caption).foregroundStyle(.secondary).lineLimit(1)
+            HStack(spacing: 12) {
+                if !topCities.isEmpty {
+                    Text("命中最多：" + topCities).lineLimit(1)
+                }
+                Spacer()
+                if model.emptyCount > 0 {
+                    Text("空返回 \(model.emptyCount)").foregroundStyle(.orange)
+                        .help("接口正常回应但没有号码：该城市没号，或被限流")
+                }
+                if model.failCount > 0 {
+                    Text("失败 \(model.failCount)").foregroundStyle(.red)
+                        .help("请求出错（超时、网络问题等），详情看日志 ⌘L")
+                }
             }
+            .font(.caption).foregroundStyle(.secondary)
         }
     }
 
