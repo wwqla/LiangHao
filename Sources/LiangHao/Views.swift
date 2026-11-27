@@ -265,8 +265,9 @@ struct SidebarView: View {
     private var statusText: String {
         if !model.statusNote.isEmpty { return model.statusNote }
         if model.isRunning {
-            if model.manualControl { return "扫描中 · 手动 \(model.scanMode.rawValue) · 并发 \(model.concurrency)" }
-            return "扫描中 · 速度「\(model.speed.rawValue)」· 并发 \(model.concurrency)"
+            let done = model.exhaustedCities > 0 ? " · \(model.exhaustedCities) 城已扫完" : ""
+            if model.manualControl { return "扫描中 · 手动 \(model.scanMode.rawValue) · 并发 \(model.concurrency)" + done }
+            return "扫描中 · 速度「\(model.speed.rawValue)」· 并发 \(model.concurrency)" + done
         }
         return "已停止 · ⌘R 开始"
     }

@@ -43,6 +43,7 @@ final class AppModel {
     private(set) var perMinute = 0
     private(set) var concurrency = 1
     private(set) var statusNote = ""
+    private(set) var exhaustedCities = 0
 
     @ObservationIgnored private var seen: Set<String> = []
     @ObservationIgnored private var task: Task<Void, Never>?
@@ -162,6 +163,7 @@ final class AppModel {
         let evaluator = Evaluator(rules: rules, excludedDigits: excluded)
         isRunning = true
         concurrency = 1
+        exhaustedCities = 0
         statusNote = ""
         addLog("开始扫描：\(ts.count) 个城市，\(rules.count) 条规律")
         task = Task { [weak self] in await self?.loop(targets: ts, evaluator: evaluator) }
@@ -180,6 +182,7 @@ final class AppModel {
         var cursor = 0
         var goodWaves = 0
         var badWaves = 0
+        var dry: [String: Int] = [:]
         let src = source
         while !Task.isCancelled {
             if !isOnline {
@@ -190,9 +193,13 @@ final class AppModel {
             if statusNote.hasPrefix("网络") { statusNote = "" }
             let manual = manualControl
             if manual { concurrency = max(1, min(64, manualConcurrency)) }
-            let n = concurrency
-            let batch = (0..<n).map { targets[(cursor + $0) % targets.count] }
-            cursor = (cursor + n) % targets.count
+            // 连续多次扫不出新号的城市视为「扫完了」，跳过；全部扫完就自动停止
+            let active = targets.filter { (dry[$0.city.code] ?? 0) < Self.dryLimit }
+            if active.isEmpty { finishExhausted(); break }
+            exhaustedCities = targets.count - active.count
+            let n = min(concurrency, active.count)
+            let batch = (0..<n).map { active[(cursor + $0) % active.count] }
+            cursor = (cursor + n) % active.count
             // 分投：每个请求错开一个间隔再发；速投：一起发
             let stagger: Double = manual && scanMode == .spaced ? Double(manualIntervalMs) / 1000 : 0
 
@@ -212,7 +219,13 @@ final class AppModel {
             var failed = 0
             for (t, r) in results {
                 switch r {
-                case .success(let nums): handle(nums, target: t, evaluator: evaluator)
+                case .success(let nums):
+                    let fresh = handle(nums, target: t, evaluator: evaluator)
+                    let before = dry[t.city.code] ?? 0
+                    dry[t.city.code] = fresh == 0 ? before + 1 : 0
+                    if fresh == 0 && before + 1 == Self.dryLimit {
+                        addLog("\(t.province.name)\(t.city.name) 已扫不出新号，跳过")
+                    }
                 case .failure: failed += 1
                 }
             }
@@ -239,7 +252,27 @@ final class AppModel {
         }
     }
 
-    private func handle(_ numbers: [String], target: Target, evaluator: Evaluator) {
+    /// 一个城市连续这么多次返回里没有新号，就认为号池扫完了
+    static let dryLimit = 8
+
+    private func finishExhausted() {
+        task = nil
+        isRunning = false
+        statusNote = ""
+        exhaustedCities = 0
+        addLog("所有选中城市都扫不出新号了，已自动停止。共查 \(checkedCount) 个，命中 \(hits.count) 个")
+        NSSound(named: "Hero")?.play()
+        if Self.canNotify {
+            let c = UNMutableNotificationContent()
+            c.title = "扫号完成"
+            c.body = "选中地区的号池扫完了，共查 \(checkedCount) 个，命中 \(hits.count) 个"
+            UNUserNotificationCenter.current().add(UNNotificationRequest(identifier: "done-\(Date().timeIntervalSince1970)", content: c, trigger: nil))
+        }
+        save()
+    }
+
+    @discardableResult
+    private func handle(_ numbers: [String], target: Target, evaluator: Evaluator) -> Int {
         var fresh = 0
         for num in numbers where seen.insert(num).inserted {
             fresh += 1
@@ -264,6 +297,7 @@ final class AppModel {
         recent.append((now, fresh))
         recent.removeAll { now.timeIntervalSince($0.0) > 60 }
         perMinute = recent.reduce(0) { $0 + $1.1 }
+        return fresh
     }
 
     private func setOnline(_ ok: Bool) {
